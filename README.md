@@ -548,7 +548,7 @@ Both COCO and YOLO resolve images by **basename** — the filename without any d
 
 `cocoyolo` guards against this as well: when building its image index it scans for duplicates and **raises an error** listing the offending filenames and their full paths.  This happens early, before any conversion work begins.
 
-If you encounter this error, you must rename the conflicting files in your source dataset before converting.  Unique filenames across the entire dataset are not just a `cocoyolo` requirement — they are a prerequisite for any reliable training or evaluation pipeline. In other words, the lack name uniqueness is simply a **recipe for disaster** I would strongly discourage.
+If you encounter this error, you must rename the conflicting files in your source dataset before converting.  Unique filenames across the entire dataset are not just a `cocoyolo` requirement — they are a prerequisite for any reliable training or evaluation pipeline. In other words, the lack of name uniqueness is simply a **recipe for disaster** I would strongly discourage.
 
 ## License
 
