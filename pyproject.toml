@@ -46,8 +46,8 @@ dependencies = [
 fast = ["pyvips"]
 
 [project.urls]
-Homepage = "https://github.com/vmazzia/cocoyolo"
-Issues = "https://github.com/vmazzia/cocoyolo/issues"
+Homepage = "https://github.com/vittorio-prodomo/cocoyolo"
+Issues = "https://github.com/vittorio-prodomo/cocoyolo/issues"
 
 [project.scripts]
 cocoyolo = "cocoyolo.cli:main"
