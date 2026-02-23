@@ -9,6 +9,7 @@ Provides three entry points:
 
 import argparse
 import logging
+import os
 from pathlib import Path
 
 
@@ -73,6 +74,16 @@ def _add_coco2yolo_args(p: argparse.ArgumentParser) -> None:
             "(default: bridge)."
         ),
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=(
+            "Number of parallel worker processes. "
+            "Defaults to all available CPU cores. "
+            "Use 1 to disable multiprocessing."
+        ),
+    )
 
 
 def _add_yolo2coco_args(p: argparse.ArgumentParser) -> None:
@@ -98,6 +109,7 @@ def _run_coco2yolo(args: argparse.Namespace) -> None:
         disjoint_strategy=args.disjoint_strategy,
         task=args.task,
         image_mode=args.image_mode,
+        workers=args.workers,
         verbose=not args.quiet,
     )
 

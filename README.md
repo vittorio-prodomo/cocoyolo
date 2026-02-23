@@ -1,6 +1,6 @@
 # cocoyolo
 
-Bidirectional **COCO (json) ↔ YOLO Ultralytics (txt)** format converter for **object detection** and **instance segmentation** datasets.
+Bidirectional **COCO (json) ↔ YOLO Ultralytics (txt)** label format converter for **object detection** and **instance segmentation** datasets.
 
 Works out of the box for the simple cases, and handles the hard ones too: **RLE masks**, **holes**, **disjoint regions**, and **mixed annotation types** — all the edge cases that other tools silently break on.
 
@@ -8,7 +8,7 @@ Works out of the box for the simple cases, and handles the hard ones too: **RLE 
 
 COCO-to-YOLO conversion is one of those tasks that seems trivial until you try it on a real-world dataset.  If all your annotations are simple polygon outlines, or maybe just bounding boxes, any converter will likely do.  The trouble starts when your dataset contains:
 
-- **RLE-encoded masks** (common when exporting mask/brush tool shapes from CVAT, SA, or the original COCO dataset itself)
+- **RLE-encoded masks** (common when exporting mask/brush tool shapes from CVAT, SA, or in the original COCO dataset itself)
 - **Holes** in masks (e.g., a donut, or an object with a window through it)
 - **Disjoint regions** in a single annotation (e.g., an occluded object visible in two separate areas)
 - **A mix of bounding boxes and segmentation masks** in the same JSON file
@@ -93,6 +93,7 @@ info, stats = coco_to_yolo(
     hole_strategy="bridge",      # or "fill"
     disjoint_strategy="bridge",  # or "split"
     task="auto",                 # or "detect", "segment"
+    workers=8,                   # default: all CPU cores
 )
 
 # YOLO → COCO
@@ -280,6 +281,21 @@ Maximum simplification. This is what the majority of other tools do, sometimes w
 | `bridge` | `split` | Holes preserved, each region becomes a separate instance. |
 | `fill` | `split` | Holes filled, regions split.  Maximum simplification. |
 
+## Parallel Processing
+
+COCO-to-YOLO conversion can be CPU-intensive, especially for datasets rich in RLE masks, holes, and disjoint regions — each annotation requires mask decoding, contour extraction, polygon approximation, and potentially bridge computation.  Since every image is independent, `cocoyolo` processes them in parallel using `multiprocessing`.
+
+By default, all available CPU cores are used.  You can control this with `--workers`:
+
+```bash
+coco2yolo path/to/coco path/to/yolo --workers 8
+coco2yolo path/to/coco path/to/yolo --workers 1   # disable multiprocessing
+```
+
+On a dataset of 100 images with dense annotations and a high proportion of edge cases (RLE masks with holes, disjoint regions requiring bridging), conversion time dropped from **5 minutes 34 seconds** to **20 seconds** — a **~17x speedup**.
+
+The actual speedup depends on the dataset: simple bounding-box conversions are I/O-bound and benefit less, while segmentation-heavy datasets with RLE masks and complex geometries see the largest gains.
+
 ## YOLO → COCO
 
 The reverse direction is straightforward.  Each YOLO label line is already a self-contained annotation:
@@ -296,7 +312,8 @@ Category IDs are shifted from YOLO's 0-based indexing to COCO's 1-based conventi
 ```
 usage: coco2yolo [-h] [--task {auto,detect,segment}] [--contour-approx FLOAT]
                  [--hole-strategy {fill,bridge}] [--disjoint-strategy {split,bridge}]
-                 [--image-mode {copy,symlink,hardlink}] [--quiet] input output
+                 [--image-mode {copy,symlink,hardlink}] [--workers N]
+                 [--quiet] input output
 
 positional arguments:
   input                 Input COCO dataset directory.
@@ -308,6 +325,7 @@ options:
   --hole-strategy       How to handle holes in RLE masks (default: bridge).
   --disjoint-strategy   How to handle disjoint regions (default: bridge).
   --image-mode          How to transfer images: copy, symlink, or hardlink (default: copy).
+  --workers N           Number of parallel workers (default: all available cores).
   -q, --quiet           Suppress progress output.
 ```
 

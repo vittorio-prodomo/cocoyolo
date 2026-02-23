@@ -12,6 +12,9 @@ consistency.  If the dataset is mixed, the user must explicitly choose
 
 import json
 import logging
+import multiprocessing
+import os
+import shutil
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,7 +26,7 @@ from tqdm import tqdm
 
 from .dataset import COCODatasetInfo, COCOSplit, load_coco_dataset
 from .geometry import approx_contour, bridge_disjoint, bridge_holes, group_contours
-from .io_utils import FileLinker, create_data_yaml, find_coco_image
+from .io_utils import create_data_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +228,7 @@ def convert(
     disjoint_strategy: str = "bridge",
     task: str = "auto",
     image_mode: str = "copy",
+    workers: Optional[int] = None,
     verbose: bool = True,
 ) -> Tuple[COCODatasetInfo, ConversionStats]:
     """Convert a COCO dataset to YOLO Ultralytics format.
@@ -249,6 +253,9 @@ def convert(
             ``"copy"`` (default) makes full copies.
             ``"symlink"`` creates relative symbolic links.
             ``"hardlink"`` creates hard links.
+        workers: Number of parallel worker processes.  ``None`` (default)
+            uses all available CPU cores.  ``1`` disables
+            multiprocessing.
         verbose: Show progress bars.
 
     Returns:
@@ -277,51 +284,132 @@ def convert(
     input_path = Path(input_path)
     output_path = Path(output_path)
 
+    if workers is None or workers <= 0:
+        workers = os.cpu_count() or 1
+
     logger.info("COCO -> YOLO: %s -> %s", input_path, output_path)
     logger.info(
-        "Strategies: holes=%s, disjoint=%s", hole_strategy, disjoint_strategy,
+        "Strategies: holes=%s, disjoint=%s, workers=%d",
+        hole_strategy, disjoint_strategy, workers,
     )
 
     src_info = load_coco_dataset(input_path, verbose=verbose)
-    linker = FileLinker(mode=image_mode)
     total_stats = ConversionStats()
 
-    try:
-        # Create output directories
-        for split in src_info.splits:
-            (output_path / "images" / split).mkdir(parents=True, exist_ok=True)
-            (output_path / "labels" / split).mkdir(parents=True, exist_ok=True)
+    # Create output directories
+    for split in src_info.splits:
+        (output_path / "images" / split).mkdir(parents=True, exist_ok=True)
+        (output_path / "labels" / split).mkdir(parents=True, exist_ok=True)
 
-        all_class_names: Dict[int, str] = {}
-        for split_name, split in src_info.splits.items():
-            logger.info("Converting split: %s", split_name)
-            split_classes, split_stats = _convert_split(
-                split, src_info, output_path, linker,
-                contour_approx_factor, hole_strategy, disjoint_strategy,
-                task, verbose,
-            )
-            all_class_names.update(split_classes)
-            total_stats.split_stats[split_name] = split_stats
-            total_stats.merge(split_stats)
+    all_class_names: Dict[int, str] = {}
+    for split_name, split in src_info.splits.items():
+        logger.info("Converting split: %s", split_name)
+        split_classes, split_stats = _convert_split(
+            split, src_info, output_path,
+            contour_approx_factor, hole_strategy, disjoint_strategy,
+            task, image_mode, workers, verbose,
+        )
+        all_class_names.update(split_classes)
+        total_stats.split_stats[split_name] = split_stats
+        total_stats.merge(split_stats)
 
-        # Propagate resolved task from first split
-        if not total_stats.task:
-            for ss in total_stats.split_stats.values():
-                if ss.task:
-                    total_stats.task = ss.task
-                    break
+    # Propagate resolved task from first split
+    if not total_stats.task:
+        for ss in total_stats.split_stats.values():
+            if ss.task:
+                total_stats.task = ss.task
+                break
 
-        # Build sequential 0-based class mapping for the YAML
-        ordered = sorted(set(all_class_names.values()))
-        yolo_classes = {i: name for i, name in enumerate(ordered)}
-        create_data_yaml(output_path, yolo_classes, list(src_info.splits.keys()))
+    # Build sequential 0-based class mapping for the YAML
+    ordered = sorted(set(all_class_names.values()))
+    yolo_classes = {i: name for i, name in enumerate(ordered)}
+    create_data_yaml(output_path, yolo_classes, list(src_info.splits.keys()))
 
-        logger.info("COCO -> YOLO conversion complete")
-        return src_info, total_stats
+    logger.info("COCO -> YOLO conversion complete")
+    return src_info, total_stats
 
-    except Exception:
-        linker.rollback()
-        raise
+
+# ------------------------------------------------------------------
+# Image index + file transfer helpers
+# ------------------------------------------------------------------
+
+
+def _build_image_index(search_root: Path) -> Dict[str, Path]:
+    """Build a ``{filename: path}`` index by scanning *search_root* once.
+
+    Replaces per-image ``rglob`` lookups with a single directory walk.
+    """
+    index: Dict[str, Path] = {}
+    for p in search_root.rglob("*"):
+        if p.is_file() and p.name not in index:
+            index[p.name] = p
+    return index
+
+
+def _transfer_file(src: Path, dst: Path, mode: str) -> None:
+    """Copy, symlink, or hardlink *src* to *dst*.
+
+    Falls back to copy if the requested link mode fails.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if mode == "symlink":
+        try:
+            rel = os.path.relpath(src, dst.parent)
+            os.symlink(rel, dst)
+            return
+        except (OSError, ValueError):
+            pass
+    elif mode == "hardlink":
+        try:
+            os.link(src.resolve(), dst)
+            return
+        except OSError:
+            pass
+    shutil.copy2(src, dst)
+
+
+# ------------------------------------------------------------------
+# Per-image worker (module-level for multiprocessing picklability)
+# ------------------------------------------------------------------
+
+
+def _process_image(work_item: tuple) -> ConversionStats:
+    """Process one image: transfer file and write YOLO labels.
+
+    Args:
+        work_item: Tuple of
+            ``(src_img, dst_img, dst_lbl, img_w, img_h, annotations,
+            cat_to_yolo, task, approx_factor, hole_strategy,
+            disjoint_strategy, image_mode)``.
+
+    Returns:
+        ``ConversionStats`` for this single image.
+    """
+    (
+        src_img, dst_img, dst_lbl,
+        img_w, img_h, annotations, cat_to_yolo,
+        task, approx_factor, hole_strategy, disjoint_strategy, image_mode,
+    ) = work_item
+
+    stats = ConversionStats()
+
+    if src_img is None:
+        stats.images_not_found += 1
+        return stats
+
+    _transfer_file(src_img, dst_img, image_mode)
+
+    if task == "detect":
+        _write_yolo_detect_labels(
+            annotations, dst_lbl, cat_to_yolo, img_w, img_h, stats,
+        )
+    else:
+        _write_yolo_segment_labels(
+            annotations, dst_lbl, cat_to_yolo, img_w, img_h,
+            approx_factor, hole_strategy, disjoint_strategy, stats,
+        )
+
+    return stats
 
 
 # ------------------------------------------------------------------
@@ -333,11 +421,12 @@ def _convert_split(
     split: COCOSplit,
     info: COCODatasetInfo,
     output: Path,
-    linker: FileLinker,
     approx_factor: float,
     hole_strategy: str,
     disjoint_strategy: str,
     task: str,
+    image_mode: str,
+    workers: int,
     verbose: bool,
 ) -> Tuple[Dict[int, str], ConversionStats]:
     """Convert one COCO split -> YOLO.  Returns (category_map, stats)."""
@@ -379,36 +468,42 @@ def _convert_split(
     for ann in all_anns:
         anns_by_img[ann["image_id"]].append(ann)
 
+    # Pre-resolve all image paths (single directory scan)
     search_root = split.images_root or info.root_dir
+    image_index = _build_image_index(search_root)
 
-    for img_id, img_info in tqdm(
-        img_map.items(),
-        desc=f"  {split.name}",
-        disable=not verbose,
-    ):
+    # Build work items
+    work_items = []
+    for img_id, img_info in img_map.items():
         filename = img_info["file_name"]
-        w, h = img_info["width"], img_info["height"]
-
-        src_img = find_coco_image(filename, search_root)
-        if src_img is None:
-            logger.warning("Image not found: %s", filename)
-            stats.images_not_found += 1
-            continue
-
+        src_img = image_index.get(Path(filename).name)
         dst_img = output / "images" / split.name / Path(filename).name
         dst_lbl = output / "labels" / split.name / (Path(filename).stem + ".txt")
 
-        linker.link(src_img, dst_img)
+        work_items.append((
+            src_img, dst_img, dst_lbl,
+            img_info["width"], img_info["height"],
+            anns_by_img[img_id], cat_to_yolo,
+            resolved, approx_factor,
+            hole_strategy, disjoint_strategy, image_mode,
+        ))
 
-        if resolved == "detect":
-            _write_yolo_detect_labels(
-                anns_by_img[img_id], dst_lbl, cat_to_yolo, w, h, stats,
-            )
-        else:
-            _write_yolo_segment_labels(
-                anns_by_img[img_id], dst_lbl, cat_to_yolo, w, h,
-                approx_factor, hole_strategy, disjoint_strategy, stats,
-            )
+    # Dispatch — sequential or parallel
+    effective_workers = min(workers, len(work_items)) if work_items else 1
+    if effective_workers <= 1:
+        for item in tqdm(
+            work_items, desc=f"  {split.name}", disable=not verbose,
+        ):
+            stats.merge(_process_image(item))
+    else:
+        with multiprocessing.Pool(effective_workers) as pool:
+            for result in tqdm(
+                pool.imap_unordered(_process_image, work_items),
+                total=len(work_items),
+                desc=f"  {split.name}",
+                disable=not verbose,
+            ):
+                stats.merge(result)
 
     return cats, stats
 
