@@ -13,8 +13,8 @@ import os
 from pathlib import Path
 
 
-def _add_common_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("input", type=Path, help="Input dataset directory.")
+def _add_common_args(p: argparse.ArgumentParser, input_help: str = "Input dataset directory.") -> None:
+    p.add_argument("input", type=Path, help=input_help)
     p.add_argument("output", type=Path, help="Output dataset directory.")
     p.add_argument(
         "--image-mode",
@@ -87,7 +87,13 @@ def _add_coco2yolo_args(p: argparse.ArgumentParser) -> None:
 
 
 def _add_yolo2coco_args(p: argparse.ArgumentParser) -> None:
-    _add_common_args(p)
+    _add_common_args(
+        p,
+        input_help=(
+            "Input YOLO dataset directory (must contain a data*.yaml file), "
+            "or direct path to a YAML file."
+        ),
+    )
     p.add_argument(
         "--keep-zero-indexing",
         action="store_true",

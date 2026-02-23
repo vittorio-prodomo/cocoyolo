@@ -4,6 +4,67 @@ Bidirectional **COCO (json) ↔ YOLO Ultralytics (txt)** label format converter 
 
 Works out of the box for the simple cases, and handles the hard ones too: **RLE masks**, **holes**, **disjoint regions**, and **mixed annotation types** — all the edge cases that other tools silently break on.
 
+## The Two Formats at a Glance
+
+### Object detection
+
+In COCO, a bounding box is stored as absolute pixel coordinates `[x, y, w, h]` (top-left origin) inside a JSON annotation object:
+
+```json
+{
+  "id": 1,
+  "image_id": 42,
+  "category_id": 3,
+  "bbox": [120.0, 45.5, 200.0, 310.0],
+  "area": 62000.0,
+  "iscrowd": 0
+}
+```
+
+In YOLO Ultralytics, the same box becomes a single line in a `.txt` file — class index followed by the **normalised** centre coordinates, width, and height (all divided by image dimensions) `[xc, yc, w, h]`:
+
+```
+2 0.3143 0.3226 0.2857 0.4968
+```
+
+The mapping is one-to-one: `class_id xc yc w h`.
+
+### Instance segmentation
+
+In COCO for instance segmentation, the annotation object keeps the same fields as above (`id`, `image_id`, `category_id`, `bbox`, `area`, `iscrowd`) but adds a `segmentation` field describing the mask. This field can take two forms.
+
+As a **polygon list** — a list of lists of `[x, y]` vertex pairs in absolute pixels, where each inner list is a separate polygon.  A single annotation can carry **multiple polygons** (disjoint parts of the same object), but it doesn't natively support the concept of "holes" in polygons (other tools/formats may use conventions on the winding order to also model holes, but not COCO):
+
+```json
+{
+  // ... same fields as above ...
+  "segmentation": [
+    [100.0, 50.0, 200.0, 50.0, 200.0, 180.0, 100.0, 180.0], // first polygon
+    [250.0, 60.0, 320.0, 60.0, 320.0, 170.0, 250.0, 170.0]  // second polygon
+  ]
+}
+```
+
+Or as an **RLE-encoded binary mask** — the full rasterized mask compressed in Run-Length Encoding, which naturally supports holes and arbitrary shapes:
+
+```json
+{
+  // ... same fields as above ...
+  "segmentation": {
+    "counts": "Pfh01o10O10O001N1O2M2N1O2N1O1...",
+    "size": [480, 640]
+  }
+}
+```
+
+In YOLO Ultralytics, only the "polygon" form exists and it gets condensed into a single text line — class index followed by **normalised** `x y` vertex pairs forming one polygon:
+
+```
+2 0.1429 0.0806 0.2857 0.0806 0.2857 0.2903 0.1429 0.2903
+```
+
+The mapping is strictly **one line → one polygon → one object**.  There is currently no way to represent multiple disjoint polygons per object, and no concept of holes (inner rings) within a polygon.  This is the fundamental limitation that `cocoyolo` is designed to work around.
+
 ## Why Another Converter?
 
 COCO-to-YOLO conversion is one of those tasks that seems trivial until you try it on a real-world dataset.  If all your annotations are simple polygon outlines, or maybe just bounding boxes, any converter will likely do.  The trouble starts when your dataset contains:
@@ -34,7 +95,7 @@ So I decided to design a new, powerful and flexible converter, `cocoyolo`, speci
 
 - **Disjoint region handling.**  Multiple connected components in a single annotation are detected and handled via `--disjoint-strategy bridge` (connect them with a greedy nearest-neighbour chain of zero-width bridges into one polygon) or `--disjoint-strategy split` (emit each region as a separate YOLO annotation).
 
-- **Uniform output guarantee.**  YOLO expects either all bounding boxes or all polygons — never both in the same dataset.  `cocoyolo` pre-scans the annotations, auto-detects the task type, and raises a clear error on mixed datasets with explicit instructions (`--task detect` to force bounding boxes, `--task segment` to keep only segmentation).
+- **Uniform output guarantee.**  YOLO expects either all bounding boxes or all polygons — never both in the same dataset.  As a safety check, `cocoyolo` pre-scans the json annotations, auto-detects the task type, and raises a clear error on mixed datasets with explicit instructions (`--task detect` to force bounding boxes, `--task segment` to keep only segmentation).
 
 - **Conversion statistics.**  Every run prints exactly what happened: how many annotations of each type were processed, how many edge cases were encountered, and how each was resolved.
 
@@ -127,6 +188,10 @@ All layouts are **auto-detected** — just point the tool at the root directory.
 
 ### COCO layouts
 
+`cocoyolo` doesn't assume a rigid directory structure for images.  Each COCO JSON file lists image filenames in its `"images"` array; the loader resolves each filename by trying — in order — the exact relative path stored in the JSON, the same path under an `images/` subdirectory, and finally a recursive leaf-name search (matching by basename only, ignoring any directory prefix).  This means your images can live at any depth, and `file_name` in the JSON can be a bare filename or a relative path — both work. I tried to be as flexible as possible to save people from the torture of always going and having to micro-adjust names and directory structures to always "make the tool on duty happy".
+
+As practical examples of what surely works, the three common COCO layouts you'll encounter in the wild:
+
 **COCO-A** — the standard COCO layout.  Annotation JSONs live in `annotations/`, images are split into subdirectories under `images/`.  This is what you get from the [official COCO dataset](https://cocodataset.org/) or most tools that follow the COCO standard.
 
 ```
@@ -159,7 +224,7 @@ dataset/
     └── ...
 ```
 
-**COCO-C** — flat layout with no split subdirectories.  A single `annotations/` folder and a single `images/` folder.  Common for small or single-split datasets (like those that are exported from CVAT).
+**COCO-C** — flat layout with no split subdirectories.  A single `annotations/` folder and a single `images/` folder.  Common for small or single-split datasets (similar to what you get when you export from CVAT).
 
 ```
 dataset/
@@ -173,7 +238,25 @@ dataset/
 
 ### YOLO layouts
 
-**YOLO-A** — the standard Ultralytics layout.  Images and labels live under top-level `images/` and `labels/` directories, each split into subdirectories by split name.  A `data.yaml` at the root defines class names.
+The primary discovery mechanism for YOLO datasets is the **data YAML file** (`data.yaml`, `dataset.yaml`, or any file matching `data*.yaml` in the dataset directory, or a custom-named yaml directly provided in input).  This file explicitly lists per-split image sub-paths, and `cocoyolo` reads them directly — there is no hardcoded assumption about where images live.
+
+**Label paths** are derived from image paths by replacing the first occurrence of `images` with `labels` in the path — exactly as Ultralytics pipelines do internally.  This is important to know: it means your label directories must mirror your image directories with `images` swapped for `labels`.
+
+Example `data.yaml`:
+
+```yaml
+train: images/train
+val: images/val
+nc: 80
+names:
+  0: person
+  1: bicycle
+  # ...
+```
+
+The two most common directory structures you'll encounter:
+
+**YOLO-A** — the standard Ultralytics layout.  Images and labels live under top-level `images/` and `labels/` directories, each split into subdirectories by split name.
 
 ```
 dataset/
@@ -217,11 +300,46 @@ dataset/
         └── ...
 ```
 
+
+#### Passing a YAML file directly
+
+For the `yolo2coco` direction, the input can be either a directory (the usual case) or a **direct path to a YAML file** that lives anywhere on disk:
+
+```bash
+yolo2coco /path/to/custom_config.yaml /path/to/output
+```
+
+When a YAML file is given, the dataset root is determined from the `path` entry inside it (resolved relative to the YAML file's own directory), falling back to the YAML's parent directory when `path` is absent.
+
+#### A note on the `path` entry and Ultralytics quirks
+
+This `path` entry in the YOLO data YAML format is supposed to specify the dataset root directory. In principle, this allows decoupling the YAML file from the dataset:
+
+```yaml
+path: /data/my_dataset        # dataset root (absolute or relative)
+train: images/train
+val: images/val
+# ...
+```
+
+`cocoyolo` honors this field: when `path` is present, split sub-paths (`train`, `val`, etc.) are resolved relative to it.
+
+That said, **I strongly recommend keeping your `data.yaml` inside the dataset root directory and either omitting the `path` entry entirely or setting it to `path: .`**.  The reason is that the Ultralytics framework itself is notoriously finicky about how it resolves the `path` field.  Internally, Ultralytics prepends a global `datasets_dir` setting (defaulting to `~/datasets`) to any relative `path` value — which silently produces wrong paths when you're working outside that directory.  This has been the source of a long trail of user-reported bugs:
+
+- Relative `path` values get concatenated with `datasets_dir`, producing doubled or tripled paths ([#16911](https://github.com/ultralytics/ultralytics/issues/16911))
+- `path: ./my_dataset` resolves against `~/datasets` instead of the YAML's location ([#2221](https://github.com/ultralytics/ultralytics/issues/2221))
+- The resolution logic changed across versions, silently breaking existing configs ([#873](https://github.com/ultralytics/ultralytics/issues/873))
+- Even absolute paths can interact unexpectedly with `datasets_dir` depending on the Ultralytics version ([#9503](https://github.com/ultralytics/ultralytics/issues/9503))
+
+The only reliable workaround on the Ultralytics side is to override the global setting with `yolo settings datasets_dir='.'` — but that's a per-machine configuration that doesn't travel with your project.
+
+Bottom line: keep it simple.  Put `data.yaml` inside your dataset directory, don't use the `path` entry (or set it to `"."`), and your dataset will work identically across `cocoyolo`, Ultralytics, and any other tool that reads the YAML.
+
 ## Task Type Detection
 
-YOLO requires uniform label types within a dataset directory: every `.txt` file must contain either all bounding boxes (`class xc yc w h`) or all polygons (`class x1 y1 x2 y2 ...`), never a mix of the two.  COCO, on the other hand, can store both annotation types in the same JSON file. Because of this, maybe in some unintended scenario some objects may end up having only a bounding box, while others carry full segmentation masks.
+YOLO requires uniform label types within a dataset directory: every `.txt` file must contain either all bounding boxes (`class xc yc w h`) or all polygons (`class x1 y1 x2 y2 ...`), never a mix of the two.  COCO, on the other hand, can store both annotation types in the same JSON file. Because of this, maybe in some unintended scenari, or malformed COCO json files, some objects may end up having only a bounding box, while others carry full segmentation masks.
 
-`cocoyolo` pre-scans the COCO annotations before writing anything, and uses the `--task` flag to decide what to do:
+as a safety check, `cocoyolo` pre-scans the COCO annotations before writing anything, and uses the `--task` flag to decide what to do:
 
 - **`--task auto`** (default) — Counts how many annotations have segmentation data and how many are bbox-only.  If all annotations have segmentation, the output is YOLO segmentation format.  If none do, the output is YOLO detection format.  If the dataset is **mixed** (some with segmentation, some without), conversion stops with a clear error message telling you exactly how many of each type were found, and suggesting the two flags below.
 
@@ -336,7 +454,8 @@ usage: yolo2coco [-h] [--keep-zero-indexing] [--image-mode {copy,symlink,hardlin
                  [--quiet] input output
 
 positional arguments:
-  input                 Input YOLO dataset directory.
+  input                 Input YOLO dataset directory (must contain a data*.yaml
+                        file), or direct path to a YAML file.
   output                Output COCO dataset directory.
 
 options:
@@ -384,6 +503,52 @@ info, stats = coco_to_yolo("path/to/coco", "path/to/yolo", image_mode="symlink")
 | `hardlink` | No extra space | Linux, macOS, Windows | Source and output must be on the same filesystem. |
 
 If symlinks or hard links are not supported on the current platform, the converter logs a warning and falls back to copy automatically.
+
+## In-place Conversion (Two Formats, One Directory)
+
+You can pass the **same directory** as both input and output.  When the source and destination resolve to the same file, `cocoyolo` silently skips the image transfer — no wasted copies, no broken symlinks, no data corruption.
+
+This is useful when you want both COCO and YOLO labels to **co-exist** in a single dataset directory.  If you adopt the standard COCO-A layout and YOLO-A layout, the two formats share the same `images/{split}/` tree and only add their own metadata on top:
+
+```
+dataset/
+├── data.yaml                         # YOLO
+├── annotations/                      # COCO
+│   ├── instances_train.json
+│   └── instances_val.json
+├── images/                           # shared by both
+│   ├── train/
+│   │   ├── 000001.jpg
+│   │   └── ...
+│   └── val/
+│       └── ...
+└── labels/                           # YOLO
+    ├── train/
+    │   ├── 000001.txt
+    │   └── ...
+    └── val/
+        └── ...
+```
+
+This makes it easy to bounce between frameworks that expect different formats (e.g. Ultralytics for YOLO, most other tooling for COCO) like I frequently do, without maintaining separate copies of your dataset:
+
+```bash
+# Generate YOLO labels alongside existing COCO annotations
+coco2yolo my_dataset/ my_dataset/
+
+# Or the other way around
+yolo2coco my_dataset/ my_dataset/
+```
+
+This "two formats in one directory" approach works cleanly with COCO-A + YOLO-A because the two formats use non-overlapping metadata paths (`annotations/` vs `labels/` + `data.yaml`), while sharing the same `images/` tree.  Other layout combinations (e.g. COCO-B, YOLO-B) place images in split-specific folders that may not align, so in-place conversion is best suited for the standard A-layouts.
+
+## Duplicate Filenames
+
+Both COCO and YOLO resolve images by **basename** — the filename without any directory prefix.  This means that if two images share the same name in different subdirectories (e.g. `train/images/photo.jpg` and `val/images/photo.jpg`), the lookup becomes ambiguous and downstream pipelines (not just `cocoyolo`, but Ultralytics, FiftyOne, and others) will silently match the wrong file or crash.
+
+`cocoyolo` guards against this as well: when building its image index it scans for duplicates and **raises an error** listing the offending filenames and their full paths.  This happens early, before any conversion work begins.
+
+If you encounter this error, you must rename the conflicting files in your source dataset before converting.  Unique filenames across the entire dataset are not just a `cocoyolo` requirement — they are a prerequisite for any reliable training or evaluation pipeline. In other words, the lack name uniqueness is simply a **recipe for disaster** I would strongly discourage.
 
 ## License
 

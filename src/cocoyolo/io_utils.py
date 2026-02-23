@@ -132,8 +132,59 @@ def _check_hardlink_support() -> bool:
 
 
 # ------------------------------------------------------------------
-# COCO image finding
+# Image index / finding
 # ------------------------------------------------------------------
+
+
+def build_image_index(
+    search_root: Union[str, Path],
+    image_extensions: Optional[Set[str]] = None,
+) -> Dict[str, Path]:
+    """Build a ``{filename: path}`` index by scanning *search_root* once.
+
+    If two files share the same name in different sub-directories, a
+    ``ValueError`` is raised listing all duplicates.  Duplicate filenames
+    are a recipe for silent data corruption in downstream pipelines
+    (both COCO and YOLO resolve images by basename only).
+
+    Args:
+        search_root: Root directory to scan recursively.
+        image_extensions: If given, only index files with these suffixes
+            (case-insensitive).  Pass ``None`` to index all files.
+
+    Returns:
+        Mapping from filename to its resolved path.
+    """
+    root = Path(search_root)
+    index: Dict[str, Path] = {}
+    duplicates: Dict[str, List[Path]] = {}
+
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        if image_extensions is not None and p.suffix.lower() not in image_extensions:
+            continue
+        name = p.name
+        if name in index:
+            if name not in duplicates:
+                duplicates[name] = [index[name]]
+            duplicates[name].append(p)
+        else:
+            index[name] = p
+
+    if duplicates:
+        lines = ["Duplicate filenames found under " + str(root) + ":"]
+        for name, paths in sorted(duplicates.items()):
+            lines.append(f"  {name}:")
+            for dp in paths:
+                lines.append(f"    - {dp}")
+        lines.append(
+            "\nDuplicate filenames within a dataset cause ambiguous image "
+            "matching and must be resolved before conversion."
+        )
+        raise ValueError("\n".join(lines))
+
+    return index
 
 
 def find_coco_image(

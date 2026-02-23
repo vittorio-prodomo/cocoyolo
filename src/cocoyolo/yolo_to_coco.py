@@ -109,8 +109,7 @@ def convert_yolo_to_coco(
     total_stats = ConversionStats()
 
     try:
-        # Create output skeleton
-        (output_path / "images").mkdir(parents=True, exist_ok=True)
+        # Create output skeleton (COCO-A: images/{split}/ + annotations/)
         (output_path / "annotations").mkdir(parents=True, exist_ok=True)
 
         for split_name, split in src_info.splits.items():
@@ -172,12 +171,14 @@ def _convert_split(
             stats.images_skipped += 1
             continue
 
-        dst_img = output / "images" / img_path.name
+        dst_dir = output / "images" / split.name
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst_img = dst_dir / img_path.name
         linker.link(img_path, dst_img)
 
         coco["images"].append({
             "id": image_id,
-            "file_name": img_path.name,
+            "file_name": f"{split.name}/{img_path.name}",
             "width": w,
             "height": h,
         })

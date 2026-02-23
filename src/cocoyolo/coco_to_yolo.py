@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 from .dataset import COCODatasetInfo, COCOSplit, load_coco_dataset
 from .geometry import approx_contour, bridge_disjoint, bridge_holes, group_contours
-from .io_utils import create_data_yaml
+from .io_utils import build_image_index, create_data_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -334,23 +334,20 @@ def convert(
 # ------------------------------------------------------------------
 
 
-def _build_image_index(search_root: Path) -> Dict[str, Path]:
-    """Build a ``{filename: path}`` index by scanning *search_root* once.
-
-    Replaces per-image ``rglob`` lookups with a single directory walk.
-    """
-    index: Dict[str, Path] = {}
-    for p in search_root.rglob("*"):
-        if p.is_file() and p.name not in index:
-            index[p.name] = p
-    return index
+_IMAGE_EXTENSIONS = frozenset(
+    {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+)
 
 
 def _transfer_file(src: Path, dst: Path, mode: str) -> None:
     """Copy, symlink, or hardlink *src* to *dst*.
 
     Falls back to copy if the requested link mode fails.
+    Silently skips the transfer when *src* and *dst* resolve to the
+    same file (in-place conversion).
     """
+    if src.resolve() == dst.resolve():
+        return
     dst.parent.mkdir(parents=True, exist_ok=True)
     if mode == "symlink":
         try:
@@ -468,9 +465,9 @@ def _convert_split(
     for ann in all_anns:
         anns_by_img[ann["image_id"]].append(ann)
 
-    # Pre-resolve all image paths (single directory scan)
+    # Pre-resolve all image paths (single directory scan, with duplicate check)
     search_root = split.images_root or info.root_dir
-    image_index = _build_image_index(search_root)
+    image_index = build_image_index(search_root, _IMAGE_EXTENSIONS)
 
     # Build work items
     work_items = []

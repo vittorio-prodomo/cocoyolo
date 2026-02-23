@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-from .io_utils import find_coco_image
+from .io_utils import build_image_index, find_coco_image
 
 logger = logging.getLogger(__name__)
 
@@ -179,25 +179,50 @@ def _split_name_from_json(filename: str) -> Optional[str]:
     return None
 
 
+_IMAGE_EXTENSIONS = frozenset(
+    {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+)
+
+
 def _resolve_image_paths(json_path: Path, search_root: Path) -> List[Path]:
-    """Read image filenames from a COCO JSON and resolve them on disk."""
+    """Read image filenames from a COCO JSON and resolve them on disk.
+
+    Resolution order for each ``file_name`` entry:
+
+    1. ``search_root / file_name`` (the exact relative path, if it exists).
+    2. ``search_root / images / file_name``.
+    3. Leaf-name lookup: find the file anywhere under *search_root* by
+       its basename only.  This handles COCO files where ``file_name``
+       is a full or partial relative path that doesn't match the actual
+       directory layout.
+
+    A ``ValueError`` is raised if duplicate image filenames are found
+    under *search_root* (see :func:`build_image_index`).
+    """
     with open(json_path, "r") as fh:
         data = json.load(fh)
+
+    # Build a basename→path index once (also validates no duplicates)
+    image_index = build_image_index(search_root, _IMAGE_EXTENSIONS)
 
     paths: List[Path] = []
     for img_entry in data.get("images", []):
         fn = img_entry.get("file_name", "")
         if not fn:
             continue
+        # 1. Exact relative path
         direct = search_root / fn
         if direct.exists():
             paths.append(direct)
             continue
+        # 2. Under images/
         via_images = search_root / "images" / fn
         if via_images.exists():
             paths.append(via_images)
             continue
-        found = find_coco_image(Path(fn).name, search_root)
+        # 3. Leaf-name lookup from pre-built index
+        leaf = Path(fn).name
+        found = image_index.get(leaf)
         if found:
             paths.append(found)
     return paths
