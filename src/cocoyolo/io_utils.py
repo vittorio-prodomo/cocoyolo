@@ -1,4 +1,4 @@
-"""I/O utilities: file linking, image file finding, YAML writing."""
+"""I/O utilities: file linking, image file finding, YAML writing, RLE decoding."""
 
 import logging
 import os
@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+import numpy as np
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -246,3 +247,38 @@ def create_data_yaml(
 
     logger.info("Created data.yaml with %d classes at %s", len(class_dict), yaml_path)
     return yaml_path
+
+
+# ------------------------------------------------------------------
+# RLE decoding
+# ------------------------------------------------------------------
+
+
+def decode_rle(rle_data: Dict) -> np.ndarray:
+    """Decode a COCO RLE (compressed or uncompressed) to a binary mask.
+
+    Args:
+        rle_data: A dict with ``"counts"`` and ``"size"`` keys, as produced
+            by the COCO annotation format.  Both uncompressed (list of ints)
+            and compressed (string) count formats are supported.
+
+    Returns:
+        A 2-D ``uint8`` NumPy array (H x W) with 1 for foreground pixels.
+
+    Raises:
+        ValueError: If *rle_data* is not a dict or is missing required keys.
+    """
+    from pycocotools import mask as coco_mask_util
+
+    if not isinstance(rle_data, dict):
+        raise ValueError(f"RLE data must be a dict, got {type(rle_data)}")
+    if "counts" not in rle_data or "size" not in rle_data:
+        raise ValueError("RLE data must contain 'counts' and 'size' keys")
+
+    if isinstance(rle_data["counts"], list):
+        rle = coco_mask_util.frPyObjects(
+            rle_data, rle_data["size"][0], rle_data["size"][1]
+        )
+        return coco_mask_util.decode(rle)
+
+    return coco_mask_util.decode(rle_data)

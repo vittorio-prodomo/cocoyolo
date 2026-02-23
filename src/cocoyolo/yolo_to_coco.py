@@ -35,6 +35,7 @@ class ConversionStats:
     images_skipped: int = 0
     malformed_lines: int = 0
     skipped_unknown_category: int = 0
+    skipped_small_bbox: int = 0
 
     split_stats: Dict[str, "ConversionStats"] = field(default_factory=dict)
 
@@ -48,6 +49,7 @@ class ConversionStats:
         self.images_skipped += other.images_skipped
         self.malformed_lines += other.malformed_lines
         self.skipped_unknown_category += other.skipped_unknown_category
+        self.skipped_small_bbox += other.skipped_small_bbox
 
     def format_summary(self) -> str:
         lines = []
@@ -61,6 +63,8 @@ class ConversionStats:
             lines.append(f"    Malformed lines:     {self.malformed_lines}")
         if self.skipped_unknown_category:
             lines.append(f"    Unknown categories:  {self.skipped_unknown_category}")
+        if self.skipped_small_bbox:
+            lines.append(f"    Small bboxes dropped:{self.skipped_small_bbox}")
         return "\n".join(lines)
 
 
@@ -73,6 +77,7 @@ def convert_yolo_to_coco(
     input_path: Union[str, Path],
     output_path: Union[str, Path],
     keep_zero_indexing: bool = False,
+    min_bbox_size: float = 0.0,
     image_mode: str = "copy",
     verbose: bool = True,
 ) -> Tuple[YOLODatasetInfo, ConversionStats]:
@@ -87,6 +92,8 @@ def convert_yolo_to_coco(
         keep_zero_indexing: If *False* (default), category IDs in the
             output JSON start at 1 (COCO convention).  If *True*,
             they mirror the 0-based YOLO class indices.
+        min_bbox_size: Drop bounding boxes whose width **or** height is
+            smaller than this value (in pixels).  Defaults to 0 (keep all).
         image_mode: How to transfer images to the output directory.
             ``"copy"`` (default) makes full copies.
             ``"symlink"`` creates relative symbolic links.
@@ -116,7 +123,7 @@ def convert_yolo_to_coco(
             logger.info("Converting split: %s", split_name)
             split_stats = _convert_split(
                 split, src_info, output_path, linker,
-                keep_zero_indexing, verbose,
+                keep_zero_indexing, min_bbox_size, verbose,
             )
             total_stats.split_stats[split_name] = split_stats
             total_stats.merge(split_stats)
@@ -140,6 +147,7 @@ def _convert_split(
     output: Path,
     linker: FileLinker,
     keep_zero: bool,
+    min_bbox_size: float,
     verbose: bool,
 ) -> ConversionStats:
     """Convert one YOLO split to a COCO JSON + images directory."""
@@ -187,7 +195,7 @@ def _convert_split(
         if label_file and label_file.exists():
             new_anns = _convert_labels(
                 label_file, image_id, info.class_names,
-                w, h, keep_zero, stats,
+                w, h, keep_zero, min_bbox_size, stats,
             )
             for ann in new_anns:
                 ann["id"] = ann_id
@@ -220,6 +228,7 @@ def _convert_labels(
     img_w: int,
     img_h: int,
     keep_zero: bool,
+    min_bbox_size: float,
     stats: ConversionStats,
 ) -> List[Dict]:
     """Parse a YOLO ``.txt`` file and return a list of COCO annotation dicts."""
@@ -238,6 +247,15 @@ def _convert_labels(
                 stats.skipped_unknown_category += 1
                 continue
 
+            bbox = parsed["bbox"]
+            if parsed["type"] == "polygon":
+                bbox = recompute_bbox_from_polygon(parsed["polygon"])
+
+            # Filter tiny bboxes when requested
+            if min_bbox_size > 0 and (bbox[2] < min_bbox_size or bbox[3] < min_bbox_size):
+                stats.skipped_small_bbox += 1
+                continue
+
             coco_cid = cid if keep_zero else cid + 1
             ann: Dict = {
                 "image_id": image_id,
@@ -248,7 +266,7 @@ def _convert_labels(
 
             if parsed["type"] == "bbox":
                 stats.bbox_only += 1
-                ann["bbox"] = parsed["bbox"]
+                ann["bbox"] = bbox
                 ann["segmentation"] = []
                 annotations.append(ann)
 
@@ -258,7 +276,7 @@ def _convert_labels(
                 flat = []
                 for px, py in points:
                     flat.extend([float(px), float(py)])
-                ann["bbox"] = recompute_bbox_from_polygon(points)
+                ann["bbox"] = bbox
                 ann["segmentation"] = [flat]
                 annotations.append(ann)
 

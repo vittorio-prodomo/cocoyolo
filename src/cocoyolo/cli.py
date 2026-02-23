@@ -102,6 +102,15 @@ def _add_yolo2coco_args(p: argparse.ArgumentParser) -> None:
             "By default, IDs are shifted to 1-based (COCO convention)."
         ),
     )
+    p.add_argument(
+        "--min-bbox-size",
+        type=float,
+        default=0.0,
+        help=(
+            "Drop bounding boxes whose width or height is smaller "
+            "than this value in pixels (default: 0, keep all)."
+        ),
+    )
 
 
 def _run_coco2yolo(args: argparse.Namespace) -> None:
@@ -136,6 +145,7 @@ def _run_yolo2coco(args: argparse.Namespace) -> None:
         args.input,
         args.output,
         keep_zero_indexing=args.keep_zero_indexing,
+        min_bbox_size=args.min_bbox_size,
         image_mode=args.image_mode,
         verbose=not args.quiet,
     )

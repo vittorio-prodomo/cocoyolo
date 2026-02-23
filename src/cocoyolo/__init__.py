@@ -18,6 +18,7 @@ Usage::
 from .coco_to_yolo import convert as coco_to_yolo
 from .dataset import COCODatasetInfo, COCOSplit, load_coco_dataset
 from .dataset_yolo import YOLODatasetInfo, YOLOSplit, load_yolo_dataset
+from .io_utils import decode_rle
 from .yolo_to_coco import convert_yolo_to_coco as yolo_to_coco
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "COCOSplit",
     "YOLODatasetInfo",
     "YOLOSplit",
+    "decode_rle",
 ]
 
 __version__ = "0.1.0"

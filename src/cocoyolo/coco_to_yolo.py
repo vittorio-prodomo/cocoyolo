@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 from .dataset import COCODatasetInfo, COCOSplit, load_coco_dataset
 from .geometry import approx_contour, bridge_disjoint, bridge_holes, group_contours
-from .io_utils import build_image_index, create_data_yaml
+from .io_utils import build_image_index, create_data_yaml, decode_rle
 
 logger = logging.getLogger(__name__)
 
@@ -670,7 +670,7 @@ def _rle_to_yolo(
        *disjoint_strategy*.
     """
     try:
-        mask = _decode_rle(rle)
+        mask = decode_rle(rle)
         mask[mask > 0] = 255
     except Exception as exc:
         logger.warning("Failed to decode RLE: %s", exc)
@@ -740,29 +740,6 @@ def _rle_to_yolo(
     stats.disjoint_bridged += 1
     bridged = bridge_disjoint(processed)
     return [_normalize_point_list(bridged, img_w, img_h)]
-
-
-# ------------------------------------------------------------------
-# RLE decoding
-# ------------------------------------------------------------------
-
-
-def _decode_rle(rle_data: Dict) -> np.ndarray:
-    """Decode a COCO RLE (compressed or uncompressed) to a binary mask."""
-    from pycocotools import mask as coco_mask_util
-
-    if not isinstance(rle_data, dict):
-        raise ValueError(f"RLE data must be a dict, got {type(rle_data)}")
-    if "counts" not in rle_data or "size" not in rle_data:
-        raise ValueError("RLE data must contain 'counts' and 'size' keys")
-
-    if isinstance(rle_data["counts"], list):
-        rle = coco_mask_util.frPyObjects(
-            rle_data, rle_data["size"][0], rle_data["size"][1]
-        )
-        return coco_mask_util.decode(rle)
-
-    return coco_mask_util.decode(rle_data)
 
 
 # ------------------------------------------------------------------
