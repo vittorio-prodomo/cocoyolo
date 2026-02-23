@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cocoyolo"
+version = "0.1.0"
+description = "Bidirectional COCO ↔ YOLO format converter with proper handling of holes and disjoint regions."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    { name = "Vittorio Mazzia" },
+]
+keywords = [
+    "coco",
+    "yolo",
+    "object-detection",
+    "instance-segmentation",
+    "dataset-conversion",
+    "computer-vision",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dependencies = [
+    "numpy",
+    "opencv-python-headless>=4.5",
+    "pycocotools>=2.0",
+    "PyYAML>=5.0",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+fast = ["pyvips"]
+
+[project.urls]
+Homepage = "https://github.com/vmazzia/cocoyolo"
+Issues = "https://github.com/vmazzia/cocoyolo/issues"
+
+[project.scripts]
+cocoyolo = "cocoyolo.cli:main"
+coco2yolo = "cocoyolo.cli:main_coco2yolo"
+yolo2coco = "cocoyolo.cli:main_yolo2coco"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cocoyolo"]
