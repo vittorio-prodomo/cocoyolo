@@ -87,7 +87,7 @@ Every major ML framework or Data management library ships some version of this c
 
 So I decided to design a new, powerful and flexible converter, `cocoyolo`, specifically to fill these gaps.
 
-### What cocoyolo does differently
+### What cocoyolo does differently (when converting from COCO to YOLO)
 
 - **Full RLE support.**  RLE masks (compressed or uncompressed) are decoded to binary masks, contoured with `cv2.findContours`, and converted to polygons.  Nothing is silently skipped.
 
