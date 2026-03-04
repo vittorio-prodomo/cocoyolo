@@ -324,7 +324,7 @@ val: images/val
 
 `cocoyolo` honors this field: when `path` is present, split sub-paths (`train`, `val`, etc.) are resolved relative to it.
 
-That said, **I strongly recommend keeping your `data.yaml` inside the dataset root directory and either omitting the `path` entry entirely or setting it to `path: .`**.  The reason is that the Ultralytics framework itself is notoriously finicky about how it resolves the `path` field.  Internally, Ultralytics prepends a global `datasets_dir` setting (defaulting to `~/datasets`) to any relative `path` value — which silently produces wrong paths when you're working outside that directory.  This has been the source of a long trail of user-reported bugs:
+That said, **I strongly recommend keeping your `data.yaml` inside the dataset root directory and either omitting the `path` entry entirely or setting it to `path: .`**.  The reason is that, at the time of writing this, the Ultralytics framework itself is still notoriously finicky about how it resolves the `path` field.  Internally, Ultralytics prepends a global `datasets_dir` setting (defaulting to `~/datasets`) to any relative `path` value — which silently produces wrong paths when you're working outside that directory.  This has been the source of a long trail of user-reported bugs:
 
 - Relative `path` values get concatenated with `datasets_dir`, producing doubled or tripled paths ([#16911](https://github.com/ultralytics/ultralytics/issues/16911))
 - `path: ./my_dataset` resolves against `~/datasets` instead of the YAML's location ([#2221](https://github.com/ultralytics/ultralytics/issues/2221))
@@ -337,7 +337,7 @@ Bottom line: keep it simple.  Put `data.yaml` inside your dataset directory, don
 
 ## Task Type Detection
 
-YOLO requires uniform label types within a dataset directory: every `.txt` file must contain either all bounding boxes (`class xc yc w h`) or all polygons (`class x1 y1 x2 y2 ...`), never a mix of the two.  COCO, on the other hand, can store both annotation types in the same JSON file. Because of this, maybe in some unintended scenari, or malformed COCO json files, some objects may end up having only a bounding box, while others carry full segmentation masks.
+YOLO requires uniform label types within a dataset directory: every `.txt` file must contain either all bounding boxes (`class xc yc w h`) or all polygons (`class x1 y1 x2 y2 ...`), never a mix of the two.  COCO, on the other hand, can store both annotation types in the same JSON file. Because of this, maybe in some unintended scenarios, or malformed COCO json files, some objects may end up having only a bounding box, while others carry full segmentation masks.
 
 as a safety check, `cocoyolo` pre-scans the COCO annotations before writing anything, and uses the `--task` flag to decide what to do:
 
