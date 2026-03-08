@@ -315,3 +315,84 @@ def _traverse_chain(
                 k += 1
 
     return result
+
+
+# ------------------------------------------------------------------
+# Mask to polygons
+# ------------------------------------------------------------------
+
+
+def mask_to_polygons(
+    mask: np.ndarray,
+    approx_factor: float = 0.002,
+    hole_strategy: str = "bridge",
+    disjoint_strategy: str = "bridge",
+) -> List[List[List[float]]]:
+    """Convert a binary mask to polygon point lists in pixel space.
+
+    Decodes the mask into OpenCV contours, groups outers with holes,
+    applies hole and disjoint strategies, and returns pixel-space
+    point lists ready for clipping or normalization.
+
+    Args:
+        mask: 2-D ``uint8`` array where non-zero pixels are foreground.
+        approx_factor: Contour simplification factor passed to
+            :func:`approx_contour`.  Smaller values keep more detail.
+        hole_strategy: ``"bridge"`` (connect holes via zero-width seams)
+            or ``"fill"`` (discard holes, keep only outer boundary).
+        disjoint_strategy: ``"bridge"`` (connect disjoint regions) or
+            ``"split"`` (return separate polygons).
+
+    Returns:
+        List of polygon point lists.  Each point list is
+        ``[[x, y], [x, y], ...]`` in pixel coordinates.  When
+        *disjoint_strategy* is ``"split"``, multiple lists may be
+        returned; otherwise exactly one (or zero if the mask is empty).
+    """
+    # Ensure binary mask with 255 foreground
+    binary = mask.copy()
+    binary[binary > 0] = 255
+
+    contours, hierarchy = cv2.findContours(
+        binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE,
+    )
+    if not contours:
+        return []
+
+    groups = group_contours(contours, hierarchy)
+    if not groups:
+        return []
+
+    # Phase 1 — apply hole strategy per outer contour (pixel space)
+    processed: List[List[List[float]]] = []
+    for outer, holes in groups:
+        outer_approx = approx_contour(outer, approx_factor)
+        if outer_approx is None:
+            continue
+        outer_pts = outer_approx.squeeze().tolist()
+
+        if hole_strategy == "fill" or not holes:
+            processed.append(outer_pts)
+        else:
+            hole_contours = [
+                h for h in
+                (approx_contour(h, approx_factor) for h in holes)
+                if h is not None
+            ]
+            if hole_contours:
+                processed.append(bridge_holes(outer_pts, hole_contours))
+            else:
+                processed.append(outer_pts)
+
+    if not processed:
+        return []
+
+    # Phase 2 — apply disjoint strategy
+    if len(processed) == 1:
+        return [processed[0]]
+
+    if disjoint_strategy == "split":
+        return processed
+
+    bridged = bridge_disjoint(processed)
+    return [bridged]

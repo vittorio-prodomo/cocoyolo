@@ -25,7 +25,7 @@ import numpy as np
 from tqdm import tqdm
 
 from .dataset import COCODatasetInfo, COCOSplit, load_coco_dataset
-from .geometry import approx_contour, bridge_disjoint, bridge_holes, group_contours
+from .geometry import bridge_disjoint, group_contours, mask_to_polygons
 from .io_utils import build_image_index, create_data_yaml, decode_rle
 
 logger = logging.getLogger(__name__)
@@ -662,84 +662,52 @@ def _rle_to_yolo(
 ) -> List[List[float]]:
     """Decode RLE -> contours -> normalised YOLO polygon coordinates.
 
-    Processing happens in two phases:
-
-    1. **Hole phase** -- for each outer contour, apply *hole_strategy*
-       to its child holes (if any), producing one pixel-space point list.
-    2. **Disjoint phase** -- across all resulting point lists, apply
-       *disjoint_strategy*.
+    Delegates the core mask-to-polygon conversion to
+    :func:`~cocoyolo.geometry.mask_to_polygons`, then normalises the
+    pixel-space result and updates conversion statistics.
     """
     try:
         mask = decode_rle(rle)
-        mask[mask > 0] = 255
     except Exception as exc:
         logger.warning("Failed to decode RLE: %s", exc)
         stats.rle_decode_failures += 1
         return []
 
-    contours, hierarchy = cv2.findContours(
-        mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
+    polys = mask_to_polygons(
+        mask,
+        approx_factor=approx_factor,
+        hole_strategy=hole_strategy,
+        disjoint_strategy=disjoint_strategy,
     )
-    if not contours:
+    if not polys:
         return []
 
+    # Update statistics (mask_to_polygons doesn't track these)
+    # Inspect the mask to determine hole/disjoint classification
+    contours, hierarchy = cv2.findContours(
+        (mask > 0).astype(np.uint8) * 255,
+        cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE,
+    )
     groups = group_contours(contours, hierarchy)
-    if not groups:
-        return []
+    has_holes = any(len(holes) > 0 for _, holes in groups)
+    is_disjoint = len(groups) > 1
 
-    # Track hole statistics
-    has_any_holes = False
-
-    # Phase 1 -- Apply hole strategy per outer contour (pixel space)
-    processed: List[List[List[float]]] = []
-    for outer, holes in groups:
-        outer_approx = approx_contour(outer, approx_factor)
-        if outer_approx is None:
-            continue
-        outer_pts = outer_approx.squeeze().tolist()
-
-        if hole_strategy == "fill" or not holes:
-            if holes:
-                has_any_holes = True
-                stats.holes_filled += 1
-            processed.append(outer_pts)
-        else:
-            hole_contours = [
-                h for h in
-                (approx_contour(h, approx_factor) for h in holes)
-                if h is not None
-            ]
-            if hole_contours:
-                has_any_holes = True
-                stats.holes_bridged += 1
-                processed.append(bridge_holes(outer_pts, hole_contours))
-            else:
-                processed.append(outer_pts)
-
-    if not processed:
-        return []
-
-    # Classify the RLE annotation
-    if has_any_holes:
+    if has_holes:
         stats.rle_with_holes += 1
-    elif len(processed) > 1:
+        if hole_strategy == "fill":
+            stats.holes_filled += sum(1 for _, h in groups if h)
+        else:
+            stats.holes_bridged += sum(1 for _, h in groups if h)
+    elif is_disjoint:
         stats.rle_disjoint += 1
+        if disjoint_strategy == "split":
+            stats.disjoint_split += 1
+        else:
+            stats.disjoint_bridged += 1
     else:
         stats.rle_simple += 1
 
-    # Phase 2 -- Apply disjoint strategy
-    if len(processed) == 1:
-        return [_normalize_point_list(processed[0], img_w, img_h)]
-
-    if disjoint_strategy == "split":
-        stats.disjoint_split += 1
-        return [
-            _normalize_point_list(pts, img_w, img_h) for pts in processed
-        ]
-
-    stats.disjoint_bridged += 1
-    bridged = bridge_disjoint(processed)
-    return [_normalize_point_list(bridged, img_w, img_h)]
+    return [_normalize_point_list(p, img_w, img_h) for p in polys]
 
 
 # ------------------------------------------------------------------
