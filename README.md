@@ -188,7 +188,7 @@ All layouts are **auto-detected** — just point the tool at the root directory.
 
 ### COCO layouts
 
-`cocoyolo` doesn't assume a rigid directory structure for images.  Each COCO JSON file lists image filenames in its `"images"` array; the loader resolves each filename by trying — in order — the exact relative path stored in the JSON, the same path under an `images/` subdirectory, and finally a recursive leaf-name search (matching by basename only, ignoring any directory prefix).  This means your images can live at any depth, and `file_name` in the JSON can be a bare filename or a relative path — both work. I tried to be as flexible as possible to save people from the torture of always going and having to micro-adjust names and directory structures to always "make the tool on duty happy".
+`cocoyolo` doesn't assume a rigid directory structure for images.  Each COCO JSON file lists image filenames in its `"images"` array; the loader resolves each filename by extracting its **basename** and looking for it via a single recursive scan of the dataset root — no matter where the file actually lives on disk.  Whether `file_name` in the JSON is a bare filename (`photo.jpg`) or a relative path (`subdir/photo.jpg`), `cocoyolo` will find the image as long as it exists somewhere under the dataset directory.  I tried to be as flexible as possible to save people from the torture of always going and having to micro-adjust names and directory structures to always "make the tool on duty happy".
 
 As practical examples of what surely works, the three common COCO layouts you'll encounter in the wild:
 
@@ -546,9 +546,9 @@ This "two formats in one directory" approach works cleanly with COCO-A + YOLO-A 
 
 Both COCO and YOLO resolve images by **basename** — the filename without any directory prefix.  This means that if two images share the same name in different subdirectories (e.g. `train/images/photo.jpg` and `val/images/photo.jpg`), the lookup becomes ambiguous and downstream pipelines (not just `cocoyolo`, but Ultralytics, FiftyOne, and others) will silently match the wrong file or crash.
 
-`cocoyolo` guards against this as well: when building its image index it scans for duplicates and **raises an error** listing the offending filenames and their full paths.  This happens early, before any conversion work begins.
+`cocoyolo` guards against this: when building its image index it scans for duplicates and **logs a warning** listing the offending filenames and their full paths.  The first occurrence of each basename is kept for image resolution, and colliding output filenames are automatically **renamed with a numeric suffix** (`photo_1.jpg`, `photo_2.jpg`, etc.) so that no data is silently lost or overwritten.
 
-If you encounter this error, you must rename the conflicting files in your source dataset before converting.  Unique filenames across the entire dataset are not just a `cocoyolo` requirement — they are a prerequisite for any reliable training or evaluation pipeline. In other words, the lack of name uniqueness is simply a **recipe for disaster** I would strongly discourage.
+That said, unique filenames across the entire dataset are not just a `cocoyolo` recommendation — they are a prerequisite for any reliable training or evaluation pipeline.  In other words, the lack of name uniqueness is simply a **recipe for disaster** I would strongly discourage.
 
 ## License
 

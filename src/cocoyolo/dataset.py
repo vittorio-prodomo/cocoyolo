@@ -1,10 +1,8 @@
 """COCO dataset detection and loading.
 
-Handles the three common COCO directory layouts:
-
-    COCO-A:  images/{split}/ + annotations/instances_{split}.json
-    COCO-B:  {split}/_annotations.coco.json   (Roboflow inline)
-    COCO-C:  annotations/*.json + images/     (flat, single-split)
+Auto-discovers COCO annotation JSONs and resolves images by basename
+via a single recursive scan of the dataset root.  No rigid directory
+structure is assumed for images — they can live at any depth.
 """
 
 import json
@@ -12,8 +10,6 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Union
-
-from .io_utils import build_image_index, find_coco_image
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +48,19 @@ class COCODatasetInfo:
 def load_coco_dataset(
     dataset_dir: Union[str, Path], verbose: bool = True
 ) -> COCODatasetInfo:
-    """Auto-detect COCO layout and return dataset metadata.
+    """Auto-detect COCO annotation files and return dataset metadata.
 
-    Tries COCO-A, COCO-B, then COCO-C in that order.
+    Discovers COCO JSON files by scanning (in order):
+
+    1. ``annotations/`` directory for ``*.json``
+    2. Known split directories (``train/``, ``val/``, ``test/``) for
+       inline ``_annotations.coco.json``
+    3. Root-level ``*.json`` files
+
+    Each candidate is validated as a COCO file (must contain both
+    ``"images"`` and ``"annotations"`` keys).  Images are not resolved
+    here — they are looked up by basename during conversion via a
+    single recursive scan of the dataset root.
 
     Args:
         dataset_dir: Root directory of the COCO dataset.
@@ -70,14 +76,14 @@ def load_coco_dataset(
     if not root.exists():
         raise FileNotFoundError(f"Dataset directory not found: {root}")
 
-    splits = _try_coco_a(root) or _try_coco_b(root) or _try_coco_c(root)
+    splits = _discover_coco_jsons(root)
     if not splits:
         raise FileNotFoundError(
-            f"No COCO annotations found in any recognised layout under {root}"
+            f"No COCO annotations found under {root}"
         )
 
     class_names = _load_class_names(splits)
-    total = sum(len(s.image_paths) for s in splits.values())
+    total = _count_json_images(splits)
 
     if verbose:
         logger.info(
@@ -94,66 +100,97 @@ def load_coco_dataset(
 
 
 # ------------------------------------------------------------------
-# Variant detectors
+# JSON discovery
 # ------------------------------------------------------------------
 
 
-def _try_coco_a(root: Path) -> Optional[Dict[str, COCOSplit]]:
-    """Standard COCO: ``annotations/instances_{split}.json``."""
+def _discover_coco_jsons(root: Path) -> Optional[Dict[str, COCOSplit]]:
+    """Find all COCO annotation JSONs under *root*.
+
+    Scans three locations in order:
+
+    1. ``annotations/`` directory
+    2. Known split directories (``train/``, ``val/``, ``test/``) for
+       inline ``_annotations.coco.json``
+    3. Root-level ``*.json`` files
+
+    Each candidate is validated and the first valid JSON per split
+    name wins.
+    """
+    candidates: List[Path] = []
+
+    # 1. annotations/ directory (standard COCO)
     ann_dir = root / "annotations"
-    if not ann_dir.is_dir():
-        return None
+    if ann_dir.is_dir():
+        candidates.extend(sorted(ann_dir.glob("*.json")))
 
-    splits: Dict[str, COCOSplit] = {}
-    for json_path in sorted(ann_dir.glob("*.json")):
-        split_name = _split_name_from_json(json_path.name)
-        if split_name is None:
-            continue
-        image_paths = _resolve_image_paths(json_path, root)
-        splits[split_name] = COCOSplit(
-            name=split_name,
-            ann_path=json_path,
-            image_paths=image_paths,
-        )
-
-    return splits or None
-
-
-def _try_coco_b(root: Path) -> Optional[Dict[str, COCOSplit]]:
-    """Roboflow inline: ``{split}/_annotations.coco.json``."""
-    splits: Dict[str, COCOSplit] = {}
-    for dir_name in ("train", "valid", "val", "test"):
+    # 2. Inline JSONs in known split directories (Roboflow)
+    for dir_name in sorted(_KNOWN_SPLIT_DIRS):
         json_path = root / dir_name / "_annotations.coco.json"
-        if not json_path.exists():
+        if json_path.exists():
+            candidates.append(json_path)
+
+    # 3. Root-level JSON files
+    candidates.extend(sorted(root.glob("*.json")))
+
+    # Deduplicate preserving discovery order
+    seen: set = set()
+    unique: List[Path] = []
+    for c in candidates:
+        r = c.resolve()
+        if r not in seen:
+            seen.add(r)
+            unique.append(c)
+
+    splits: Dict[str, COCOSplit] = {}
+    for json_path in unique:
+        if not _is_coco_json(json_path):
             continue
-        split_name = _normalise_split(dir_name)
-        image_paths = _resolve_image_paths(json_path, json_path.parent)
+        split_name = _infer_split_name(json_path)
+        if split_name in splits:
+            continue  # first match per split wins
         splits[split_name] = COCOSplit(
             name=split_name,
             ann_path=json_path,
-            images_root=json_path.parent,
-            image_paths=image_paths,
         )
+
     return splits or None
 
 
-def _try_coco_c(root: Path) -> Optional[Dict[str, COCOSplit]]:
-    """Flat COCO: a single JSON in ``annotations/`` with no split dirs."""
-    ann_dir = root / "annotations"
-    if not ann_dir.is_dir():
-        return None
-    jsons = sorted(ann_dir.glob("*.json"))
-    if not jsons:
-        return None
-    json_path = jsons[0]
-    image_paths = _resolve_image_paths(json_path, root)
-    return {
-        "train": COCOSplit(
-            name="train",
-            ann_path=json_path,
-            image_paths=image_paths,
+def _is_coco_json(path: Path) -> bool:
+    """Check whether *path* is a COCO annotation JSON."""
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return (
+            isinstance(data, dict)
+            and "images" in data
+            and "annotations" in data
         )
-    }
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def _infer_split_name(json_path: Path) -> str:
+    """Determine the split name for a COCO JSON file.
+
+    Tries (in order):
+
+    1. Filename pattern (``instances_train.json`` → ``train``).
+    2. Parent directory name if it's a known split dir.
+    3. Falls back to ``"train"``.
+    """
+    # From filename
+    name = _split_name_from_json(json_path.name)
+    if name is not None:
+        return name
+
+    # From parent directory
+    parent = json_path.parent.name.lower()
+    if parent in _KNOWN_SPLIT_DIRS:
+        return _normalise_split(parent)
+
+    return "train"
 
 
 # ------------------------------------------------------------------
@@ -179,53 +216,17 @@ def _split_name_from_json(filename: str) -> Optional[str]:
     return None
 
 
-_IMAGE_EXTENSIONS = frozenset(
-    {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
-)
-
-
-def _resolve_image_paths(json_path: Path, search_root: Path) -> List[Path]:
-    """Read image filenames from a COCO JSON and resolve them on disk.
-
-    Resolution order for each ``file_name`` entry:
-
-    1. ``search_root / file_name`` (the exact relative path, if it exists).
-    2. ``search_root / images / file_name``.
-    3. Leaf-name lookup: find the file anywhere under *search_root* by
-       its basename only.  This handles COCO files where ``file_name``
-       is a full or partial relative path that doesn't match the actual
-       directory layout.
-
-    A ``ValueError`` is raised if duplicate image filenames are found
-    under *search_root* (see :func:`build_image_index`).
-    """
-    with open(json_path, "r") as fh:
-        data = json.load(fh)
-
-    # Build a basename→path index once (also validates no duplicates)
-    image_index = build_image_index(search_root, _IMAGE_EXTENSIONS)
-
-    paths: List[Path] = []
-    for img_entry in data.get("images", []):
-        fn = img_entry.get("file_name", "")
-        if not fn:
-            continue
-        # 1. Exact relative path
-        direct = search_root / fn
-        if direct.exists():
-            paths.append(direct)
-            continue
-        # 2. Under images/
-        via_images = search_root / "images" / fn
-        if via_images.exists():
-            paths.append(via_images)
-            continue
-        # 3. Leaf-name lookup from pre-built index
-        leaf = Path(fn).name
-        found = image_index.get(leaf)
-        if found:
-            paths.append(found)
-    return paths
+def _count_json_images(splits: Dict[str, COCOSplit]) -> int:
+    """Count total images across all splits by reading their JSONs."""
+    total = 0
+    for split in splits.values():
+        try:
+            with open(split.ann_path, "r") as f:
+                data = json.load(f)
+            total += len(data.get("images", []))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return total
 
 
 def _load_class_names(splits: Dict[str, COCOSplit]) -> Dict[int, str]:

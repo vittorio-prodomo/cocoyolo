@@ -144,9 +144,9 @@ def build_image_index(
     """Build a ``{filename: path}`` index by scanning *search_root* once.
 
     If two files share the same name in different sub-directories, a
-    ``ValueError`` is raised listing all duplicates.  Duplicate filenames
-    are a recipe for silent data corruption in downstream pipelines
-    (both COCO and YOLO resolve images by basename only).
+    warning is logged and the first occurrence is kept.  Duplicate
+    basenames will be renamed in the output (suffixed ``_1``, ``_2``,
+    etc.) during conversion.
 
     Args:
         search_root: Root directory to scan recursively.
@@ -180,26 +180,12 @@ def build_image_index(
             for dp in paths:
                 lines.append(f"    - {dp}")
         lines.append(
-            "\nDuplicate filenames within a dataset cause ambiguous image "
-            "matching and must be resolved before conversion."
+            "\nKeeping first occurrence of each; duplicates will be "
+            "renamed in the output."
         )
-        raise ValueError("\n".join(lines))
+        logger.warning("\n".join(lines))
 
     return index
-
-
-def find_coco_image(
-    filename: str, search_root: Union[str, Path]
-) -> Optional[Path]:
-    """Recursively find *filename* under *search_root*.
-
-    Returns the first match, or ``None``.
-    """
-    root = Path(search_root)
-    for p in root.rglob(filename):
-        if p.is_file():
-            return p
-    return None
 
 
 # ------------------------------------------------------------------

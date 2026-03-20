@@ -465,17 +465,31 @@ def _convert_split(
     for ann in all_anns:
         anns_by_img[ann["image_id"]].append(ann)
 
-    # Pre-resolve all image paths (single directory scan, with duplicate check)
-    search_root = split.images_root or info.root_dir
-    image_index = build_image_index(search_root, _IMAGE_EXTENSIONS)
+    # Pre-resolve all image paths (single recursive scan from dataset root)
+    image_index = build_image_index(info.root_dir, _IMAGE_EXTENSIONS)
 
-    # Build work items
+    # Build work items (with output basename deduplication)
     work_items = []
+    seen_basenames: Dict[str, int] = {}
     for img_id, img_info in img_map.items():
         filename = img_info["file_name"]
-        src_img = image_index.get(Path(filename).name)
-        dst_img = output / "images" / split.name / Path(filename).name
-        dst_lbl = output / "labels" / split.name / (Path(filename).stem + ".txt")
+        basename = Path(filename).name
+        stem = Path(filename).stem
+        ext = Path(filename).suffix
+
+        src_img = image_index.get(basename)
+
+        # Deduplicate output names
+        if basename in seen_basenames:
+            count = seen_basenames[basename]
+            seen_basenames[basename] = count + 1
+            out_name = f"{stem}_{count}{ext}"
+        else:
+            seen_basenames[basename] = 1
+            out_name = basename
+
+        dst_img = output / "images" / split.name / out_name
+        dst_lbl = output / "labels" / split.name / (Path(out_name).stem + ".txt")
 
         work_items.append((
             src_img, dst_img, dst_lbl,
