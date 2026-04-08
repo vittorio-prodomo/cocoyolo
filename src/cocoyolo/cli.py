@@ -50,8 +50,8 @@ def _add_coco2yolo_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--contour-approx",
         type=float,
-        default=0.001,
-        help="Contour approximation factor (default: 0.001).",
+        default=0.0005,
+        help="Contour approximation factor (default: 0.0005).",
     )
     p.add_argument(
         "--hole-strategy",

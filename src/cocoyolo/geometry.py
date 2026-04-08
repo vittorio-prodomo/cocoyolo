@@ -324,7 +324,7 @@ def _traverse_chain(
 
 def mask_to_polygons(
     mask: np.ndarray,
-    approx_factor: float = 0.002,
+    approx_factor: float = 0.0005,
     hole_strategy: str = "bridge",
     disjoint_strategy: str = "bridge",
 ) -> List[List[List[float]]]:

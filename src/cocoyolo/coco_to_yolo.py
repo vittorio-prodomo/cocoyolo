@@ -223,7 +223,7 @@ class ConversionStats:
 def convert(
     input_path: Union[str, Path],
     output_path: Union[str, Path],
-    contour_approx_factor: float = 0.001,
+    contour_approx_factor: float = 0.0005,
     hole_strategy: str = "bridge",
     disjoint_strategy: str = "bridge",
     task: str = "auto",

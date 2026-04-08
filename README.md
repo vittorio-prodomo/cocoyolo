@@ -439,7 +439,7 @@ positional arguments:
 
 options:
   --task                YOLO output type: auto, detect, or segment (default: auto).
-  --contour-approx      Contour approximation factor (default: 0.001).
+  --contour-approx      Contour approximation factor (default: 0.0005).
   --hole-strategy       How to handle holes in RLE masks (default: bridge).
   --disjoint-strategy   How to handle disjoint regions (default: bridge).
   --image-mode          How to transfer images: copy, symlink, or hardlink (default: copy).
