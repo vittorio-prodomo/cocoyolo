@@ -45,6 +45,9 @@ dependencies = [
 [project.optional-dependencies]
 fast = ["pyvips"]
 
+[dependency-groups]
+dev = ["pytest>=7"]
+
 [project.urls]
 Homepage = "https://github.com/vittorio-prodomo/cocoyolo"
 Issues = "https://github.com/vittorio-prodomo/cocoyolo/issues"

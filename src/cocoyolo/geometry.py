@@ -5,12 +5,12 @@ to single closed YOLO polygons:
 
 1. **Hole bridging** — walk the outer boundary and splice in each hole as
    a reversed-ring detour, connected by zero-width bridges.
-2. **Disjoint bridging** — build a greedy nearest-neighbour chain through
-   all disjoint polygons and traverse it so that each transition is a
-   zero-width bridge.
+2. **Disjoint bridging** — splice each disjoint polygon's full ring into an
+   accumulator via a doubled (out-and-back) zero-width bridge, so even-odd
+   fill equals their union for any fragment count (the doubled-keyhole).
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -155,7 +155,7 @@ def bridge_holes(
 
 
 # ------------------------------------------------------------------
-# Disjoint bridging (greedy nearest-neighbour chain)
+# Disjoint bridging (doubled-keyhole union)
 # ------------------------------------------------------------------
 
 
@@ -164,24 +164,17 @@ def bridge_disjoint(
 ) -> List[List[float]]:
     """Connect disjoint polygons via zero-width bridges in pixel space.
 
-    Builds a greedy nearest-neighbour chain through all polygons,
-    then traverses the chain so that each polygon is entered and exited
-    at the bridge points, producing proper zero-width bridges.
+    Delegates to :func:`bridge_keyhole`, which splices each polygon's full
+    ring into an accumulator with a doubled (out-and-back) zero-width bridge,
+    so even-odd fill of the result equals the union of the inputs for any
+    fragment count.
 
-    For the chain ``[A -- B -- C]``:
-
-    * Start at A's bridge point toward B, trace A's full ring.
-    * Cross zero-width bridge to B (A_exit == A_bridge, B_entry == B_bridge_A).
-    * On B, trace from entry (bridge to A) around to exit (bridge to C).
-    * Cross zero-width bridge to C.
-    * Trace C's full ring.
-    * Implicit close: back to A's start creates the final back-bridge.
+    Return contract: ``[]`` for no input, the sole ``point_lists[0]``
+    verbatim for a single polygon, otherwise one bridged ring.
     """
     if len(point_lists) <= 1:
         return point_lists[0] if point_lists else []
-
-    chain, bridges = _build_chain(point_lists)
-    return _traverse_chain(point_lists, chain, bridges)
+    return bridge_keyhole(point_lists)
 
 
 def closest_points(
@@ -200,121 +193,57 @@ def closest_points(
     return best_i, best_j, best_d
 
 
-def _build_chain(
-    point_lists: List[List[List[float]]],
-) -> Tuple[List[int], Dict[Tuple[int, int], Tuple[int, int]]]:
-    """Build a greedy nearest-neighbour chain through *point_lists*.
+def _closest_pair(out: np.ndarray, ring: np.ndarray) -> Tuple[int, int]:
+    """Indices ``(i in out, j in ring)`` of the closest point pair (vectorised)."""
+    d = ((out[:, None, :] - ring[None, :, :]) ** 2).sum(-1)
+    i, j = np.unravel_index(int(d.argmin()), d.shape)
+    return int(i), int(j)
+
+
+def _signed_area(ring: np.ndarray) -> float:
+    """Shoelace signed area of a closed ring (>= 0 is our canonical winding)."""
+    x, y = ring[:, 0], ring[:, 1]
+    return 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+
+
+def bridge_keyhole(
+    rings: List[List[List[float]]],
+) -> List[List[float]]:
+    """Bridge N disjoint simple polygons into one even-odd-fillable ring.
+
+    Splices each ring into the accumulator at the closest point pair,
+    tracing the ring's FULL loop back to the bridge vertex so the bridge is a
+    DOUBLED coincident segment (zero area, even crossing-parity). Even-odd
+    fill of the result equals the union of the rings for any N -- a bridge may
+    route through another fragment without un-filling it.
+
+    Args:
+        rings: polygon point lists ``[[x, y], ...]`` in pixel space.
 
     Returns:
-        chain: Ordered list of polygon indices forming the path.
-        bridges: ``{(chain[k], chain[k+1]): (exit_idx, entry_idx)}``
-            mapping each directed edge to the vertex indices used for
-            the bridge on each polygon.
+        One polygon point list ``[[x, y], ...]``. ``[]`` if no ring has
+        >= 3 points; the sole ring (as a list) if exactly one qualifies.
+        The multi-ring result is oriented counter-clockwise (deterministic).
     """
-    n = len(point_lists)
-
-    # Pre-compute the best bridge for every unordered pair
-    pair_info: Dict[Tuple[int, int], Tuple[int, int, float]] = {}
-    for i in range(n):
-        for j in range(i + 1, n):
-            i1, i2, d = closest_points(point_lists[i], point_lists[j])
-            pair_info[(i, j)] = (i1, i2, d)
-
-    def _bridge(a: int, b: int) -> Tuple[int, int, float]:
-        """Return (idx_on_a, idx_on_b, dist^2) for the pair a->b."""
-        if a < b:
-            return pair_info[(a, b)]
-        i2, i1, d = pair_info[(b, a)]
-        return i1, i2, d
-
-    # Greedy nearest-neighbour: start from polygon 0, always pick the
-    # closest unvisited polygon.
-    visited = {0}
-    chain = [0]
-    for _ in range(n - 1):
-        current = chain[-1]
-        best_next, best_dist = -1, float("inf")
-        for cand in range(n):
-            if cand in visited:
-                continue
-            _, _, d = _bridge(current, cand)
-            if d < best_dist:
-                best_next, best_dist = cand, d
-        visited.add(best_next)
-        chain.append(best_next)
-
-    # Record bridge vertex indices for each consecutive pair in chain
-    bridges: Dict[Tuple[int, int], Tuple[int, int]] = {}
-    for k in range(len(chain) - 1):
-        a, b = chain[k], chain[k + 1]
-        ia, ib, _ = _bridge(a, b)
-        bridges[(a, b)] = (ia, ib)
-
-    return chain, bridges
-
-
-def _traverse_chain(
-    polys: List[List[List[float]]],
-    chain: List[int],
-    bridges: Dict[Tuple[int, int], Tuple[int, int]],
-) -> List[List[float]]:
-    """Traverse the chain, emitting one connected polygon.
-
-    Each polygon in the chain is entered at a bridge point and exited
-    at another (or the same, for end-of-chain polygons).  The traversal
-    always follows the polygon's vertex order between entry and exit.
-
-    For chain ``[A, B, C]``::
-
-        Start at A's bridge-to-B point.
-        Trace A ring (full loop back to bridge-to-B).
-        Jump to B's bridge-from-A point.           <- zero-width bridge
-        Trace B from bridge-from-A to bridge-to-C.
-        Jump to C's bridge-from-B point.           <- zero-width bridge
-        Trace C ring (full loop back to bridge-from-B).
-        Implicit close back to A start.            <- zero-width bridge
-    """
-    result: List[List[float]] = []
-
-    for pos, poly_idx in enumerate(chain):
-        poly = polys[poly_idx]
-        n = len(poly)
-
-        is_first = pos == 0
-        is_last = pos == len(chain) - 1
-
-        # Determine entry point (where we arrive from the previous polygon)
-        if is_first:
-            # Enter at the bridge point toward the next polygon
-            entry_vtx = bridges[(chain[0], chain[1])][0]
-        else:
-            prev = chain[pos - 1]
-            entry_vtx = bridges[(prev, poly_idx)][1]
-
-        # Determine exit point (where we depart toward the next polygon)
-        if is_last:
-            exit_vtx = entry_vtx  # full ring, exit == entry
-        else:
-            nxt = chain[pos + 1]
-            exit_vtx = bridges[(poly_idx, nxt)][0]
-
-        # Trace from entry around to exit (following vertex order)
-        if entry_vtx == exit_vtx:
-            # Full ring: emit N+1 vertices (return to start) so that the
-            # bridge departure / implicit close lands on the bridge point,
-            # not one vertex before it.
-            for k in range(n + 1):
-                result.append(poly[(entry_vtx + k) % n])
-        else:
-            # Partial ring from entry -> exit (inclusive on both ends)
-            k = entry_vtx
-            while True:
-                result.append(poly[k % n])
-                if k % n == exit_vtx:
-                    break
-                k += 1
-
-    return result
+    rs = [np.asarray(r, dtype=np.float64).reshape(-1, 2) for r in rings]
+    rs = [r for r in rs if len(r) >= 3]
+    if not rs:
+        return []
+    if len(rs) == 1:
+        return rs[0].tolist()
+    # Largest ring first: a substantial base (affects seam routing only).
+    rs.sort(key=len, reverse=True)
+    out = rs[0].copy()
+    for ring in rs[1:]:
+        i, j = _closest_pair(out, ring)
+        # Full loop of `ring` starting and ending at ring[j].
+        ring_loop = np.concatenate([ring[j:], ring[:j], ring[j:j + 1]], axis=0)
+        # out[:i+1] + ring_loop + out[i:]  ->  doubled bridge out[i] <-> ring[j].
+        out = np.concatenate([out[:i + 1], ring_loop, out[i:]], axis=0)
+    # Cosmetic: canonical CCW winding for deterministic output.
+    if _signed_area(out) < 0:
+        out = out[::-1]
+    return out.tolist()
 
 
 # ------------------------------------------------------------------
