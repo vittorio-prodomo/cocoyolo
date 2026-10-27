@@ -117,6 +117,14 @@ For faster image size reading (header-only via pyvips):
 pip install -e ".[fast]"
 ```
 
+From another project, straight from GitHub (pure Python dependencies, so `pip` works as
+well as uv):
+
+```bash
+uv add "cocoyolo @ git+https://github.com/vittorio-prodomo/cocoyolo@v0.1.0"
+# or: pip install "git+https://github.com/vittorio-prodomo/cocoyolo@v0.1.0"
+```
+
 ## Quick Start
 
 ### Command line
